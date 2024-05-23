@@ -1,6 +1,9 @@
 package memogram
 
 import (
+	"context"
+	"log/slog"
+
 	"github.com/caarlos0/env"
 	"github.com/joho/godotenv"
 	"github.com/pkg/errors"
@@ -14,7 +17,7 @@ type Config struct {
 func getConfigFromEnv() (*Config, error) {
 	err := godotenv.Load(".env")
 	if err != nil {
-		panic(err.Error())
+		slog.Log(context.Background(), slog.LevelError, "failed to load env", "msg", err.Error())
 	}
 
 	config := Config{}
