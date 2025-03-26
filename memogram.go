@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
+	"sync"
 	"unicode/utf16"
 
 	"github.com/go-telegram/bot"
@@ -28,7 +28,9 @@ type Service struct {
 	client *MemosClient
 	config *Config
 	store  *store.Store
-	cache  *Cache
+
+	mediaGroupCache sync.Map
+	mediaGroupMutex sync.Mutex
 
 	workspaceProfile *v1pb.WorkspaceProfile
 }
@@ -54,9 +56,7 @@ func NewService() (*Service, error) {
 		config: config,
 		client: client,
 		store:  store,
-		cache:  NewCache(),
 	}
-	s.cache.startGC()
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(s.handler),
@@ -123,17 +123,18 @@ func (s *Service) handleMemoCreation(ctx context.Context, m *models.Update, cont
 	var err error
 
 	if m.Message.MediaGroupID != "" {
-		cacheMemo, ok := s.cache.get(m.Message.MediaGroupID)
-		if !ok {
-			memo, err = s.createMemo(ctx, content)
-			if err != nil {
-				return nil, err
-			}
+		s.mediaGroupMutex.Lock()
+		defer s.mediaGroupMutex.Unlock()
 
-			s.cache.set(m.Message.MediaGroupID, memo, 24*time.Hour)
-		} else {
-			memo = cacheMemo.(*v1pb.Memo)
+		if cache, ok := s.mediaGroupCache.Load(m.Message.MediaGroupID); ok {
+			return cache.(*v1pb.Memo), nil
 		}
+
+		memo, err = s.createMemo(ctx, content)
+		if err != nil {
+			return nil, err
+		}
+		s.mediaGroupCache.Store(m.Message.MediaGroupID, memo)
 	} else {
 		memo, err = s.createMemo(ctx, content)
 		if err != nil {
@@ -422,11 +423,20 @@ func (s *Service) searchHandler(ctx context.Context, b *bot.Bot, m *models.Updat
 	searchString := strings.TrimPrefix(m.Message.Text, "/search ")
 	accessToken, _ := s.store.GetUserAccessToken(userID)
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("Authorization", fmt.Sprintf("Bearer %s", accessToken)))
+	user, err := s.client.AuthService.GetAuthStatus(ctx, &v1pb.GetAuthStatusRequest{})
+	if err != nil {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: m.Message.Chat.ID,
+			Text:   "Invalid access token",
+		})
+		return
+	}
+
 	results, err := s.client.MemoService.ListMemos(ctx, &v1pb.ListMemosRequest{
 		PageSize: 10,
+		Parent:   user.Name,
 		Filter:   fmt.Sprintf("content.contains('%s')", searchString),
 	})
-
 	if err != nil {
 		slog.Error("failed to search memos", slog.Any("err", err))
 		return
